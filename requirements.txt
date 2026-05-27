@@ -1,0 +1,10 @@
+# Core
+pydantic-ai[google]>=0.2.0
+google-auth>=2.0.0
+gspread>=6.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+
+# Testing
+pytest>=8.0.0
