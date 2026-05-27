@@ -56,8 +56,9 @@ Keyword hints: TNB/electricity → utility | maintenance/sinking fund → mainte
 7. Amounts are MYR. Never modify the stated amount.
 8. If month_tag is not stated, ask the user to clarify before calling any write tool.
 9. Duplicate guard: if record_income returns a message starting with "⚠️", relay the warning to the user and wait for confirmation. If the user replies 'yes' or 'confirm', call record_income again with force=True.
-10. Undo: if user says 'undo', 'delete last', or similar → call delete_last_transaction.
+10. Undo: if user says 'undo', 'delete last', or similar → call delete_last_transaction with the property_code from the most recent operation. If unsure, ask which property.
 11. When displaying tool output (reports, balances, rent status), present the text exactly as returned — do not reformat into markdown bullets or headers.
+12. Property validation: Each property has its own sheet tab. If the user mentions a property code not in the managed list, correct obvious typos (e.g. "C1613" → "C1613A") or ask the user to confirm before writing. Never write to an unrecognized property.
 
 ## Input examples
 "May26 C1613a R2 paid 700"       → record_income("C1613A", "R2", 700.0, "May26")
@@ -68,7 +69,7 @@ Keyword hints: TNB/electricity → utility | maintenance/sinking fund → mainte
 "What's my overall balance?"      → get_balance("")
 "Overall balance for May26"       → get_balance("", "May26")
 "May26 report C1613a"             → get_monthly_report("May26", "C1613A")
-"undo" / "delete last"            → delete_last_transaction()
+"undo" / "delete last"            → delete_last_transaction("C1613A")  (use property from most recent operation)
 """
 
 
@@ -114,6 +115,14 @@ async def record_income(
     prop = property_code.upper()
     room = room_id.upper() if room_id else ""
 
+    # Canonicalize room_id against the known room IDs for this property
+    # e.g. user says "room 2" → LLM sends '2', canonical is 'R2'
+    prop_rooms = (PROPERTIES.get(prop) or {}).get("room_ids") or []
+    if prop_rooms and room and room not in prop_rooms:
+        prefixed = f"R{room}"
+        if prefixed in prop_rooms:
+            room = prefixed
+
     # A: Duplicate guard
     if not force:
         try:
@@ -123,8 +132,12 @@ async def record_income(
                     f"⚠️ A rental payment for {loc} in {month_tag} is already recorded. "
                     f"Reply 'yes' to record again anyway."
                 )
-        except Exception:
-            pass  # if check fails, allow the write
+        except Exception as e:
+            loc = f"{prop} {room}".strip()
+            return (
+                f"⚠️ Could not verify duplicate status for {loc} in {month_tag} ({e}). "
+                f"Reply 'yes' to force-record anyway."
+            )
 
     row = {
         "date": ctx.deps.current_date,
@@ -187,14 +200,14 @@ async def get_rent_status(
     transactions = ctx.deps.sheets.get_transactions_by_month(month_tag, property_code or None)
 
     paid_keys = {
-        f"{t['property_code'].upper()}:{t.get('room_id', '').upper()}"
+        f"{str(t['property_code']).upper()}:{str(t.get('room_id', '')).upper()}"
         for t in transactions
         if t.get("category") == "rental" and t.get("type") == "income"
     }
 
     paid, unpaid = [], []
     for t in tenants:
-        key = f"{t['property_code'].upper()}:{t.get('room_id', '').upper()}"
+        key = f"{str(t['property_code']).upper()}:{str(t.get('room_id', '')).upper()}"
         name = t.get("tenant_name", "Unknown")
         loc = f"{t['property_code']} {t.get('room_id', '')}".strip()
         rent = float(t.get("monthly_rent", 0))
@@ -325,13 +338,13 @@ async def get_monthly_report(
 
     # Unpaid tenants
     paid_keys = {
-        f"{t['property_code'].upper()}:{t.get('room_id', '').upper()}"
+        f"{str(t['property_code']).upper()}:{str(t.get('room_id', '')).upper()}"
         for t in income_txns
         if t.get("category") == "rental"
     }
     unpaid_tenants = [
         t for t in tenants
-        if f"{t['property_code'].upper()}:{t.get('room_id', '').upper()}" not in paid_keys
+        if f"{str(t['property_code']).upper()}:{str(t.get('room_id', '')).upper()}" not in paid_keys
     ]
     if unpaid_tenants:
         lines.append(f"Unpaid rent ({len(unpaid_tenants)}):")
@@ -351,15 +364,19 @@ async def get_monthly_report(
 # ---------------------------------------------------------------------------
 
 @agent.tool
-async def delete_last_transaction(ctx: RunContext[AgentDeps]) -> str:
-    """Delete the most recently written row in the Transactions sheet (undo last entry)."""
+async def delete_last_transaction(ctx: RunContext[AgentDeps], property_code: str) -> str:
+    """Delete the most recently written row in a property's sheet (undo last entry).
+
+    Args:
+        property_code: The property code whose tab to delete from.
+    """
     try:
-        deleted = ctx.deps.sheets.delete_last_row()
+        deleted = ctx.deps.sheets.delete_last_row(property_code.upper())
         if deleted is None:
-            return "Nothing to delete — Transactions sheet is empty."
+            return f"Nothing to delete — {property_code.upper()} sheet is empty or doesn't exist."
         desc = deleted.get("description", "")
         amt = deleted.get("amount", "")
-        prop = deleted.get("property_code", "")
+        prop = deleted.get("property_code", property_code.upper())
         month = deleted.get("month_tag", "")
         return f"Deleted: {desc} RM {amt} — {prop} {month}".strip()
     except Exception as e:

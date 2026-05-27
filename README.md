@@ -173,7 +173,12 @@ Property codes and room IDs are **case-insensitive** — `c1613a`, `C1613A`, and
 │   └── utils/
 │       ├── colors.py        # Terminal colour helpers
 │       └── logger.py        # Logging setup
-└── tests/
+├── tests/
+│   ├── conftest.py          # Shared fixtures (mock_sheets, agent_deps, sample data)
+│   ├── test_sheets.py       # SheetsClient unit tests (gspread mocked)
+│   ├── test_tools.py        # Agent tool unit tests (no LLM)
+│   └── test_llm.py          # LLM routing tests (real Gemini API)
+└── pytest.ini               # asyncio_mode=auto, unit/llm marks
 ```
 
 ---
@@ -199,8 +204,73 @@ Runtime logs are written to the console (and optionally a log file, depending on
 
 ---
 
-## Running Tests
+## Testing
+
+### Quick reference
 
 ```bash
+# Code-only unit tests — no credentials or network required (~4 s)
+pytest -m unit
+
+# LLM routing tests — requires real GEMINI_API_KEY in .env
+pytest -m llm
+
+# Everything
 pytest
 ```
+
+### Test file map
+
+| File | Mark | What it tests |
+|---|---|---|
+| `tests/test_sheets.py` | `unit` | `SheetsClient` — all read/write methods with gspread mocked at the boundary |
+| `tests/test_tools.py` | `unit` | All 6 agent tool functions called directly with a mock `RunContext` (no LLM) |
+| `tests/test_llm.py` | `llm` | Real Gemini agent — asserts correct tool routing and parameter extraction for 5 prompt patterns |
+| `tests/conftest.py` | — | Shared fixtures: `sample_tenants`, `sample_transactions`, `mock_sheets`, `agent_deps`, `mock_ctx` |
+
+### Coverage at a glance
+
+**SheetsClient** (`test_sheets.py`)
+
+| Method | Scenarios covered |
+|---|---|
+| `has_rental_entry` | Match found · No match · Case-insensitive · Tab missing |
+| `get_active_tenants` | Active-only filter · Property filter · Exception → `[]` |
+| `get_transactions_by_month` | No property filter · With property · Unknown month |
+| `append_transaction` | Correct column order · Auto-creates tab + headers |
+| `delete_last_row` | Returns dict · Header-only sheet → `None` · Tab missing → `None` |
+| `get_all_transactions` | Fans out across all properties · Skips missing tabs |
+
+**Agent tools** (`test_tools.py`)
+
+| Tool | Scenarios covered |
+|---|---|
+| `record_income` | Happy path · Duplicate/`force=False` (blocked) · Duplicate/`force=True` (allowed) · Lowercase normalisation · Bare-digit room prefix |
+| `record_expense` | Happy path (correct `type`, category, property) |
+| `get_rent_status` | All paid · Mixed · Property filter forwarded · No active tenants |
+| `get_balance` | Single property · Single + `month_tag` · All properties breakdown · Empty data |
+| `get_monthly_report` | Single property · All tenants paid · Empty data |
+| `delete_last_transaction` | Success with description · Nothing to delete · `property_code` uppercased |
+
+**LLM routing** (`test_llm.py`)
+
+| Prompt pattern | Expected tool |
+|---|---|
+| `record RM800 rent for room R1 at C1613A for May26` | `record_income` |
+| `Who hasn't paid rent at C1613A for May26?` | `get_rent_status` |
+| `What's the balance for SA1903A?` | `get_balance` |
+| `TNB bill RM120 at C1613A for May26` | `record_expense` (category=utility) |
+| `undo last transaction at C1613A` | `delete_last_transaction` |
+
+### Adding tests for a new tool
+
+1. **Code-only test** — add an `async def test_<tool>_*` section in `tests/test_tools.py` following the `mock_ctx` pattern. Import the function at the top.
+2. **LLM routing test** — add a `@pytest.mark.llm` test in `tests/test_llm.py` using `_find_tool_call()`.
+3. **Update both COVERAGE MAP docstrings** at the top of those files.
+4. **Update the table above** in this README.
+
+### Adding tests for a new SheetsClient method
+
+1. Add a test section in `tests/test_sheets.py` using the `client_and_sheet` fixture.
+2. Configure `mock_spreadsheet.worksheet(...)` return values for your scenario.
+3. Update the COVERAGE MAP docstring and the README table above.
