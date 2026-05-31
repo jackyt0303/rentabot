@@ -1,21 +1,21 @@
 """
 Debug logger for RentaBot.
 
-Writes to `rentabot.log` by default — never to the CLI.
-To redirect to a different file: set the LOG_FILE env var.
-To raise the log level to INFO only: set LOG_LEVEL=INFO.
+Always writes to two destinations:
+  1. File   — `rentabot.log` by default (change via LOG_FILE env var)
+  2. Stdout — captured by systemd journal on the VM (visible via journalctl)
+              and printed to the terminal when running locally
 
-Usage:
-    from src.utils.logger import log
-    log.debug("something happened")
-    log.info("tool called: record_income")
+To raise the log level to INFO only: set LOG_LEVEL=INFO in .env.
 
-To switch to a centralized log service later:
-    Replace the FileHandler with any logging.Handler subclass.
+On the VM:
+    journalctl -u rentabot -f          # live structured logs
+    tail -f ~/rentabot/rentabot.log    # same logs in the file
 """
 
 import logging
 import os
+import sys
 
 
 def _setup() -> logging.Logger:
@@ -26,16 +26,25 @@ def _setup() -> logging.Logger:
     level = getattr(logging, os.getenv("LOG_LEVEL", "DEBUG").upper(), logging.DEBUG)
     logger.setLevel(level)
 
-    log_file = os.getenv("LOG_FILE", "rentabot.log")
-    handler = logging.FileHandler(log_file, encoding="utf-8")
-    handler.setLevel(level)
-    handler.setFormatter(
-        logging.Formatter(
-            fmt="[%(asctime)s] - [%(module)s.%(funcName)s] - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+    formatter = logging.Formatter(
+        fmt="%(asctime)s; %(module)s; %(funcName)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
-    logger.addHandler(handler)
+
+    # Handler 1: file — persistent log history survives reboots
+    log_file = os.getenv("LOG_FILE", "rentabot.log")
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # Handler 2: stdout — captured by systemd journal on the VM,
+    # printed to terminal when running locally via main.py or bot.py
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
     return logger
 
 
