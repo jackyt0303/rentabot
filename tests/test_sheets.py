@@ -373,3 +373,52 @@ def test_get_all_transactions_skips_missing_tabs(client_and_sheet, sample_transa
     result = client.get_all_transactions()
 
     assert all(t["property_code"] == "C1613A" for t in result)
+
+
+# ---------------------------------------------------------------------------
+# Payees and PersonalPayees registry tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_get_payees_auto_creates_tab(client_and_sheet):
+    client, mock_spreadsheet = client_and_sheet
+    ws = MagicMock()
+    ws.get_all_records.return_value = [
+        {"payee_name": "TANG ZHE KHEE", "property_code": "C1811", "room_id": "R3", "type": "tenant"}
+    ]
+    mock_spreadsheet.worksheet.return_value = ws
+
+    payees = client.get_payees()
+    assert len(payees) == 1
+    assert payees[0]["payee_name"] == "TANG ZHE KHEE"
+
+
+@pytest.mark.unit
+def test_upsert_payee_appends_or_updates(client_and_sheet):
+    client, mock_spreadsheet = client_and_sheet
+    ws = MagicMock()
+    ws.get_all_records.return_value = [
+        {"payee_name": "TANG ZHE KHEE", "property_code": "C1811", "room_id": "R3", "type": "tenant"}
+    ]
+    mock_spreadsheet.worksheet.return_value = ws
+
+    # Test updating existing payee
+    client.upsert_payee("TANG ZHE KHEE", "C1811", "R3", "tenant", "updated")
+    ws.update.assert_called_once()
+
+    # Test appending new payee
+    ws.reset_mock()
+    client.upsert_payee("NEW PAYEE", "SA1903A", "R1", "tenant")
+    ws.append_row.assert_called_once()
+
+
+@pytest.mark.unit
+def test_personal_payees(client_and_sheet):
+    client, mock_spreadsheet = client_and_sheet
+    ws = MagicMock()
+    ws.get_all_records.return_value = []
+    mock_spreadsheet.worksheet.return_value = ws
+
+    client.upsert_personal_payee("TAX OFFICE", "Government Tax")
+    ws.append_row.assert_called_once()
+

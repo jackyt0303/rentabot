@@ -13,6 +13,8 @@ from src.config import (
     PROPERTIES,
     SHEET_TAB_TENANTS,
     SHEET_TAB_CONFIG,
+    SHEET_TAB_PAYEES,
+    SHEET_TAB_PERSONAL_PAYEES,
 )
 
 SCOPES = [
@@ -162,6 +164,75 @@ class SheetsClient:
         values = [str(row.get(col, "")) for col in header]
         sheet.append_row(values, value_input_option="RAW")
 
+    _PAYEES_COLUMNS = ["payee_name", "property_code", "room_id", "type", "notes"]
+    _PERSONAL_PAYEES_COLUMNS = ["payee_name", "description", "notes"]
+
+    @property
+    def payees_sheet(self) -> gspread.Worksheet:
+        try:
+            return self._spreadsheet.worksheet(SHEET_TAB_PAYEES)
+        except gspread.WorksheetNotFound:
+            ws = self._spreadsheet.add_worksheet(title=SHEET_TAB_PAYEES, rows=1000, cols=len(self._PAYEES_COLUMNS))
+            ws.append_row(self._PAYEES_COLUMNS, value_input_option="USER_ENTERED")
+            return ws
+
+    @property
+    def personal_payees_sheet(self) -> gspread.Worksheet:
+        try:
+            return self._spreadsheet.worksheet(SHEET_TAB_PERSONAL_PAYEES)
+        except gspread.WorksheetNotFound:
+            ws = self._spreadsheet.add_worksheet(title=SHEET_TAB_PERSONAL_PAYEES, rows=1000, cols=len(self._PERSONAL_PAYEES_COLUMNS))
+            ws.append_row(self._PERSONAL_PAYEES_COLUMNS, value_input_option="USER_ENTERED")
+            return ws
+
+    def get_payees(self) -> list[dict]:
+        """Return all rows from Payees tab, auto-creating tab if missing."""
+        try:
+            return self.payees_sheet.get_all_records()
+        except Exception:
+            return []
+
+    def upsert_payee(self, payee_name: str, property_code: str, room_id: str, type_: str = "tenant", notes: str = "") -> None:
+        """Update existing row by payee_name or append a new one."""
+        sheet = self.payees_sheet
+        records = self.get_payees()
+        row_values = [payee_name, property_code.upper(), room_id.upper(), type_, notes]
+        for idx, rec in enumerate(records, start=2):  # 1-based row index, offset by 1 header
+            if str(rec.get("payee_name", "")).strip().lower() == payee_name.strip().lower():
+                sheet.update(f"A{idx}:E{idx}", [row_values])
+                return
+        sheet.append_row(row_values, value_input_option="RAW")
+
+    def get_personal_payees(self) -> list[dict]:
+        """Return all rows from PersonalPayees tab, auto-creating tab if missing."""
+        try:
+            return self.personal_payees_sheet.get_all_records()
+        except Exception:
+            return []
+
+    def upsert_personal_payee(self, payee_name: str, description: str = "", notes: str = "") -> None:
+        """Update existing row by payee_name or append a new one."""
+        sheet = self.personal_payees_sheet
+        records = self.get_personal_payees()
+        row_values = [payee_name, description, notes]
+        for idx, rec in enumerate(records, start=2):
+            if str(rec.get("payee_name", "")).strip().lower() == payee_name.strip().lower():
+                sheet.update(f"A{idx}:C{idx}", [row_values])
+                return
+        sheet.append_row(row_values, value_input_option="RAW")
+
+    def get_rent_status_for_tenant(self, property_code: str, room_id: str) -> dict[str, str]:
+        """Return dict of {month_tag: 'paid'|'unpaid'} for transactions of this property/room."""
+        txns = self.get_transactions_by_property(property_code)
+        target_room = str(room_id).upper()
+        status = {}
+        for t in txns:
+            if t.get("category") == "rental" and str(t.get("room_id", "")).upper() == target_room:
+                mt = t.get("month_tag")
+                if mt:
+                    status[mt] = "paid"
+        return status
+
     # ------------------------------------------------------------------
     # Connection test
     # ------------------------------------------------------------------
@@ -171,3 +242,4 @@ class SheetsClient:
         title = self._spreadsheet.title
         worksheets = [ws.title for ws in self._spreadsheet.worksheets()]
         return {"title": title, "tabs": worksheets}
+

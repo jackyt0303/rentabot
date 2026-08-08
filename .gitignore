@@ -37,6 +37,7 @@ htmlcov/
 # prod
 *.csv
 *.log
+*.txt
 
 # local deployment reference (contains live credentials)
 DEPLOY.md
@@ -44,3 +45,9 @@ README_PRIVATE.md
 
 course_code/
 *_plan.md
+sample-data/
+
+openspec/
+.agent/
+.agents/
+.qoder/

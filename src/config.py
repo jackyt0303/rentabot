@@ -133,3 +133,6 @@ GEMINI_MODEL = "gemini-3.1-flash-lite"  # or "gemini-pro-latest" for more comple
 
 SHEET_TAB_TENANTS = "Tenants"
 SHEET_TAB_CONFIG = "Config"
+SHEET_TAB_PAYEES = "Payees"
+SHEET_TAB_PERSONAL_PAYEES = "PersonalPayees"
+
