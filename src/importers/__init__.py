@@ -32,3 +32,17 @@ class ClassifiedTx(NormalizedTx):
     tx_type: str = ""           # "income" | "expense" | "personal" | "unknown" | "duplicate"
     confidence: int = 0
     reasoning: str = ""
+
+
+# Lazy / direct imports for receipt parser to prevent circular dependencies
+from src.importers.receipt_parser import (
+    ClassifiedReceipt,
+    DuitNowReceipt,
+    ReceiptParsingError,
+    classify_receipt,
+    detect_image_media_type,
+    extract_receipt_from_image,
+    format_receipt_summary,
+    parse_and_classify_receipt,
+)
+
