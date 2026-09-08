@@ -33,7 +33,16 @@ from telegram.ext import (
 
 from src.agents.deps import AgentDeps
 from src.agents.rentabot import agent, record_expense, record_income
-from src.importers import ClassifiedTx, NormalizedTx, WhatsAppSignal
+from src.config import EXPENSE_CATEGORIES, PROPERTIES
+from src.importers import (
+    ClassifiedReceipt,
+    ClassifiedTx,
+    DuitNowReceipt,
+    NormalizedTx,
+    WhatsAppSignal,
+    format_receipt_summary,
+    parse_and_classify_receipt,
+)
 from src.importers.cimb_parser import parse as parse_cimb
 from src.importers.classifier import classify_batch
 from src.importers.mypb_parser import parse as parse_mypb
@@ -59,6 +68,7 @@ class ImportSession:
     awaiting_edit_idx: int | None = None
     awaiting_payee: ClassifiedTx | None = None
     unprocessed_unknowns: list[ClassifiedTx] = field(default_factory=list)
+    pending_receipt: ClassifiedReceipt | None = None
 
 
 _import_sessions: dict[int, ImportSession] = {}
@@ -93,8 +103,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  Jun26 C1613a TNB 207.8\n"
         "  Who hasn't paid May26?\n"
         "  Balance for C1613a\n\n"
+        "Receipt Vision:\n"
+        "  Send a photo or PDF of a DuitNow transfer receipt or utility bill for automated vision parsing and logging.\n\n"
         "Bulk import:\n"
-        "  Upload CIMB CSV, MyPB CSV, or WhatsApp .txt file, then type 'process'.\n\n"
+        "  Upload CIMB CSV, MyPB CSV, receipt images, or WhatsApp .txt file, then type 'process'.\n\n"
         "Send /clear to reset history and import buffer."
     )
 
@@ -113,8 +125,74 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Document / File upload handler
+# Receipt Photo & Document handlers
 # ---------------------------------------------------------------------------
+
+RECEIPT_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "pdf", "heic"}
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    allowed_id = int(os.environ["TELEGRAM_ALLOWED_USER_ID"])
+    user_id = update.effective_user.id
+    if user_id != allowed_id:
+        log.warning(f"Rejected photo from unauthorized user_id={user_id}")
+        return
+
+    photos = update.message.photo
+    if not photos:
+        return
+
+    # Take highest resolution photo
+    photo = photos[-1]
+    file_obj = await context.bot.get_file(photo.file_id)
+    content = await file_obj.download_as_bytearray()
+
+    session = _import_sessions.setdefault(user_id, ImportSession())
+    if session.files:
+        session.files.append(("receipt.jpg", bytes(content)))
+        log.info(f"PHOTO buffered for user_id={user_id} total_files={len(session.files)}")
+        await update.message.reply_text(
+            f"Buffered receipt photo. ({len(session.files)} file(s) buffered).\n"
+            f"Send more files or type 'process' to begin classification."
+        )
+        return
+
+    sheets: SheetsClient = context.bot_data["sheets"]
+    await update.message.reply_text("🔍 Analyzing receipt image with Gemini Vision... Please wait.")
+
+    try:
+        classified = await parse_and_classify_receipt(bytes(content), filename="receipt.jpg", sheets=sheets)
+        session.pending_receipt = classified
+        summary = format_receipt_summary(classified)
+
+        if classified.tx_type == "personal":
+            session.pending_receipt = None
+            await update.message.reply_text(
+                f"{summary}\n\n⊘ Identified as personal transaction. Not recorded to rental sheets."
+            )
+            return
+
+        if classified.tx_type == "duplicate":
+            await update.message.reply_text(
+                f"{summary}\n\n⚠️ Duplicate Warning: A matching transaction already exists in Sheets.\n"
+                f"Reply 'yes' or 'confirm' to force record anyway, or 'skip' to discard."
+            )
+            return
+
+        if classified.tx_type == "unknown" or not classified.property_code:
+            await update.message.reply_text(
+                f"{summary}\n\n❓ Could not determine property. Reply with property & room (e.g. 'C1613A R2') to record, or 'skip'."
+            )
+            return
+
+        await update.message.reply_text(
+            f"{summary}\n\nReply 'yes' or 'confirm' to record to Google Sheets.\n"
+            f"Or reply with corrections (e.g., 'C1613A R3 Aug26') or 'skip'."
+        )
+    except Exception as e:
+        log.error(f"Error analyzing receipt photo: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Failed to parse receipt: {e}")
+
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     allowed_id = int(os.environ["TELEGRAM_ALLOWED_USER_ID"])
@@ -129,21 +207,64 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     filename = doc.file_name or "uploaded_file"
     ext = filename.lower().split(".")[-1]
-    if ext not in ("csv", "txt"):
-        await update.message.reply_text(f"Unsupported file type '{filename}'. Please send CSV or .txt files.")
+    if ext not in ("csv", "txt") and ext not in RECEIPT_EXTENSIONS:
+        await update.message.reply_text(
+            f"Unsupported file type '{filename}'. Please send CSV, TXT, or receipt image/PDF files."
+        )
         return
 
     file_obj = await context.bot.get_file(doc.file_id)
     content = await file_obj.download_as_bytearray()
 
     session = _import_sessions.setdefault(user_id, ImportSession())
-    session.files.append((filename, bytes(content)))
 
-    log.info(f"FILE  recv user_id={user_id} filename={filename!r} total={len(session.files)}")
-    await update.message.reply_text(
-        f"Received '{filename}'. ({len(session.files)} file(s) buffered).\n"
-        f"Send more files or type 'process' to begin classification."
-    )
+    # If bulk import session active or file is a bank/chat export, buffer it
+    if ext in ("csv", "txt") or session.files:
+        session.files.append((filename, bytes(content)))
+        log.info(f"FILE  recv user_id={user_id} filename={filename!r} total={len(session.files)}")
+        await update.message.reply_text(
+            f"Received '{filename}'. ({len(session.files)} file(s) buffered).\n"
+            f"Send more files or type 'process' to begin classification."
+        )
+        return
+
+    # Single receipt document upload
+    sheets: SheetsClient = context.bot_data["sheets"]
+    await update.message.reply_text("🔍 Analyzing receipt document with Gemini Vision... Please wait.")
+
+    try:
+        classified = await parse_and_classify_receipt(bytes(content), filename=filename, sheets=sheets)
+        session.pending_receipt = classified
+        summary = format_receipt_summary(classified)
+
+        if classified.tx_type == "personal":
+            session.pending_receipt = None
+            await update.message.reply_text(
+                f"{summary}\n\n⊘ Identified as personal transaction. Not recorded to rental sheets."
+            )
+            return
+
+        if classified.tx_type == "duplicate":
+            await update.message.reply_text(
+                f"{summary}\n\n⚠️ Duplicate Warning: A matching transaction already exists in Sheets.\n"
+                f"Reply 'yes' or 'confirm' to force record anyway, or 'skip' to discard."
+            )
+            return
+
+        if classified.tx_type == "unknown" or not classified.property_code:
+            await update.message.reply_text(
+                f"{summary}\n\n❓ Could not determine property. Reply with property & room (e.g. 'C1613A R2') to record, or 'skip'."
+            )
+            return
+
+        await update.message.reply_text(
+            f"{summary}\n\nReply 'yes' or 'confirm' to record to Google Sheets.\n"
+            f"Or reply with corrections (e.g., 'C1613A R3 Aug26') or 'skip'."
+        )
+    except Exception as e:
+        log.error(f"Error analyzing receipt document: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Failed to parse receipt: {e}")
+
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +299,12 @@ async def run_import_pipeline(user_id: int, update: Update, context: ContextType
                 parsed_txns.extend(parse_mypb(content))
         elif fn_lower.endswith(".txt"):
             wa_signals.extend(parse_wa(content))
+        elif fn_lower.endswith(tuple(RECEIPT_EXTENSIONS)):
+            try:
+                c_receipt = await parse_and_classify_receipt(content, filename=fn, sheets=sheets)
+                parsed_txns.append(c_receipt.to_normalized_tx())
+            except Exception as e:
+                log.error(f"Failed to parse receipt image {fn}: {e}", exc_info=True)
 
     session.files.clear()
 
@@ -304,6 +431,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     log.info(f"MSG   recv  user_id={user_id}  text={text!r}")
 
     session = _import_sessions.get(user_id)
+
+    # 0. Handle pending receipt confirmation or correction
+    if session and session.pending_receipt:
+        rc = session.pending_receipt
+        sheets: SheetsClient = context.bot_data["sheets"]
+        deps = AgentDeps(sheets=sheets)
+        text_lower = text.lower()
+
+        if text_lower in ("skip", "cancel", "no", "discard"):
+            session.pending_receipt = None
+            await update.message.reply_text("Receipt discarded.")
+            return
+
+        if text_lower in ("yes", "confirm", "ok", "record", "proceed"):
+            session.pending_receipt = None
+            narration = rc.to_normalized_tx().narration
+            if rc.tx_type == "income":
+                res = await record_income(
+                    deps,
+                    rc.property_code,
+                    rc.room_id,
+                    rc.amount,
+                    rc.month_tag,
+                    narration,
+                    force=True,
+                )
+            else:
+                res = await record_expense(
+                    deps,
+                    rc.property_code,
+                    rc.amount,
+                    rc.category or "misc",
+                    narration,
+                    rc.month_tag,
+                    rc.room_id,
+                )
+            await update.message.reply_text(f"✓ Recorded receipt to Sheets:\n{res}")
+            return
+
+        # Check for corrections e.g. "C1613A R2 Aug26" or "utility"
+        tokens = text.split()
+        updated = False
+        for tok in tokens:
+            tok_upper = tok.upper()
+            if tok_upper in PROPERTIES:
+                rc.property_code = tok_upper
+                updated = True
+            elif re.match(r"^[rR]\d+$", tok):
+                rc.room_id = tok_upper
+                updated = True
+            elif re.match(r"^[A-Za-z]{3}\d{2}$", tok):
+                rc.month_tag = tok.capitalize()
+                updated = True
+            elif tok.lower() in EXPENSE_CATEGORIES.values():
+                rc.category = tok.lower()
+                rc.tx_type = "expense"
+                updated = True
+
+        if updated:
+            summary = format_receipt_summary(rc)
+            await update.message.reply_text(
+                f"Updated receipt:\n\n{summary}\n\nReply 'yes' or 'confirm' to record to Google Sheets, or 'skip'."
+            )
+            return
 
     # 1. Handle unknown payee response
     if session and session.awaiting_payee:
@@ -492,9 +683,10 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    log.info("STARTUP handlers registered: /start, /clear, file documents, text messages")
+    log.info("STARTUP handlers registered: /start, /clear, photo receipts, file documents, text messages")
 
     log.info("=" * 60)
     log.info(f"STARTUP RentaBot Telegram bot running  allowed_user_id={os.getenv('TELEGRAM_ALLOWED_USER_ID')}  polling...")
