@@ -1,9 +1,23 @@
 # Environment
 .env
 .env.*
+.env*.local
 
-# Credentials
+# Credentials, Keys, and Secrets
 credentials/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.cer
+*service_account*.json
+*credential*.json
+*secret*.json
+*token*.json
+credentials.json
+client_secret*.json
+.secrets*
 
 # Python
 __pycache__/
@@ -34,10 +48,23 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# prod
+# Production data & logs
 *.csv
 *.log
 *.txt
+*.bak
+*.orig
+
+# Local receipts and private user media
+receipts/
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.heic
+
+# Whitelist test fixtures only
+!tests/fixtures/**
 
 # local deployment reference (contains live credentials)
 DEPLOY.md
@@ -51,3 +78,4 @@ openspec/
 .agent/
 .agents/
 .qoder/
+
