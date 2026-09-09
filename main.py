@@ -9,13 +9,16 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 from src.agents.deps import AgentDeps
+from src.importers import format_receipt_summary, parse_and_classify_receipt
 from src.sheets.client import SheetsClient
 from src.utils.colors import Colors, agent_print, print_header
 from src.utils.logger import log
+
 
 
 def test_connection():
@@ -133,6 +136,11 @@ async def run_cli():
             agent_print("SYSTEM", "Goodbye!", Colors.INFO)
             break
 
+        if user_input.lower().startswith("receipt "):
+            filepath = user_input[8:].strip()
+            await parse_receipt_file(filepath, sheets=deps.sheets)
+            continue
+
         try:
             log.info(f"USER  >> {user_input}")
             result = await agent.run(user_input, deps=deps, message_history=chat_history)
@@ -174,16 +182,47 @@ async def run_cli():
                 agent_print("ERROR", err_str.split("\n")[0], Colors.ERROR)
 
 
+async def parse_receipt_file(file_path: str, sheets: SheetsClient | None = None) -> None:
+    """Parse and classify a single DuitNow receipt image or PDF file."""
+    path = Path(file_path)
+    if not path.exists():
+        agent_print("ERROR", f"Receipt file not found: {file_path}", Colors.ERROR)
+        return
+
+    agent_print("SYSTEM", f"Analyzing receipt with Gemini Vision: {path.name}...", Colors.INFO)
+    content = path.read_bytes()
+
+    if sheets is None:
+        try:
+            sheets = SheetsClient(
+                service_account_path=os.getenv("SERVICE_ACCOUNT_PATH"),
+                spreadsheet_id=os.getenv("GOOGLE_SHEETS_ID"),
+            )
+        except Exception:
+            pass
+
+    try:
+        classified = await parse_and_classify_receipt(content, filename=path.name, sheets=sheets)
+        print("\n" + format_receipt_summary(classified) + "\n")
+    except Exception as e:
+        agent_print("ERROR", f"Receipt parsing failed: {e}", Colors.ERROR)
+
+
 def main():
     parser = argparse.ArgumentParser(description="RentaBot — Rental Property Management")
     parser.add_argument("--test-connection", action="store_true", help="Test API connectivity")
+    parser.add_argument("--parse-receipt", type=str, metavar="PATH", help="Parse and classify a DuitNow receipt image or PDF")
     args = parser.parse_args()
 
     if args.test_connection:
         test_connection()
+    elif args.parse_receipt:
+        load_dotenv()
+        asyncio.run(parse_receipt_file(args.parse_receipt))
     else:
         asyncio.run(run_cli())
 
 
 if __name__ == "__main__":
     main()
+

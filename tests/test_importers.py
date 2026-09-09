@@ -10,6 +10,8 @@ from src.importers.whatsapp_parser import parse as parse_wa
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
+pytestmark = pytest.mark.unit
+
 
 def test_cimb_parser():
     cimb_file = FIXTURES_DIR / "CIMB Clicks Transaction History.csv"
